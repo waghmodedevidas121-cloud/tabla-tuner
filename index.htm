@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Tabla Tuner Debug</title>
+    <style>
+        :root { --bg: #000; --accent: #00e5ff; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: var(--bg); overflow: hidden; height: 100vh; width: 100vw; font-family: monospace; }
+
+        /* Error Log Box */
+        #debug-console {
+            position: absolute;
+            top: 10px; left: 10px;
+            width: 90%;
+            color: #ff3333;
+            background: rgba(20, 0, 0, 0.8);
+            border: 1px solid #ff0000;
+            padding: 10px;
+            z-index: 999;
+            display: none;
+            font-size: 14px;
+            pointer-events: none;
+        }
+
+        #overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9); display: flex; align-items: center; justify-content: center; z-index: 100;
+        }
+
+        #btn-start {
+            padding: 20px 40px; font-size: 1.2rem; font-weight: bold;
+            background: var(--accent); border: none; border-radius: 50px;
+            box-shadow: 0 0 20px var(--accent); cursor: pointer;
+        }
+
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        #canvas-ui { z-index: 10; pointer-events: none; }
+        #canvas-signal { z-index: 5; }
+    </style>
+</head>
+<body>
+
+    <div id="debug-console"></div>
+
+    <div id="overlay">
+        <button id="btn-start">Start Tuner</button>
+    </div>
+
+    <canvas id="canvas-signal"></canvas>
+    <canvas id="canvas-ui"></canvas>
+
+    <script>
+        // --- 1. ERROR HANDLING SYSTEM ---
+        function logError(msg) {
+            const consoleDiv = document.getElementById('debug-console');
+            consoleDiv.style.display = 'block';
+            consoleDiv.innerHTML += "ERROR: " + msg + "<br>";
+            console.error(msg);
+        }
+
+        window.onerror = function(message, source, lineno, colno, error) {
+            logError(message);
+        };
+
+        // --- 2. CONFIG ---
+        const CONFIG = {
+            fftSize: 16384, 
+            historySize: 0, // Will set based on screen width
+            colors: ['#00FF00', '#00FF80', '#00FFFF', '#0080FF', '#0000FF', '#8000FF', '#FF00FF', '#FF0080', '#FF0000', '#FF8000', '#FFBF00', '#FFFF00'],
+            notes: ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'],
+            threshold: 20
+        };
+
+        const historyBuffer = []; 
+
+        // --- 3. AUDIO ENGINE ---
+        class AudioEngine {
+            constructor() {
+                this.ctx = null;
+                this.analyser = null;
+                this.dataArray = null;
+            }
+
+            async init() {
+                try {
+                    // Check for Browser Support
+                    if (!window.AudioContext && !window.webkitAudioContext) {
+                        throw new Error("Web Audio API not supported in this browser.");
+                    }
+                    
+                    this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+                    this.analyser = this.ctx.createAnalyser();
+                    this.analyser.fftSize = CONFIG.fftSize;
+                    
+                    // Critical: Resume context if suspended (Chrome requirement)
+                    if (this.ctx.state === 'suspended') {
+                        await this.ctx.resume();
+                    }
+
+                    // Request Mic
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: { 
+                            echoCancellation: false, 
+                            noiseSuppression: false, 
+                            autoGainControl: false 
+                        } 
+                    });
+
+                    const source = this.ctx.createMediaStreamSource(stream);
+                    source.connect(this.analyser);
+                    this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+
+                } catch (err) {
+                    // Handle Specific Errors
+                    if (err.name === 'NotAllowedError') {
+                        logError("Microphone Access Denied. Please allow permission in settings.");
+                    } else if (err.name === 'NotFoundError') {
+                        logError("No Microphone found on this device.");
+                    } else if (err.name === 'NotReadableError') {
+                        logError("Microphone is busy or being used by another app.");
+                    } else if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+                        logError("SECURITY ERROR: You are running on 'http' or 'file'. Mobile browsers require HTTPS for Microphone access. Please host this file.");
+                    } else {
+                        logError(err.name + ": " + err.message);
+                    }
+                    throw err; // Stop execution
+                }
+            }
+
+            getPeak() {
+                if (!this.analyser) return null;
+                this.analyser.getByteFrequencyData(this.dataArray);
+                const binSize = this.ctx.sampleRate / CONFIG.fftSize;
+                
+                // Frequency Range (60Hz - 3000Hz)
+                const minBin = Math.floor(60 / binSize);
+                const maxBin = Math.floor(3000 / binSize);
+
+                let maxAmp = 0;
+                let maxIndex = -1;
+
+                for (let i = minBin; i < maxBin; i++) {
+                    if (this.dataArray[i] > maxAmp) {
+                        maxAmp = this.dataArray[i];
+                        maxIndex = i;
+                    }
+                }
+
+                if (maxAmp < CONFIG.threshold) return null;
+
+                let exactFreq = maxIndex * binSize;
+                // Interpolation
+                if (maxIndex > 0 && maxIndex < this.dataArray.length - 1) {
+                    const l = this.dataArray[maxIndex-1];
+                    const c = this.dataArray[maxIndex];
+                    const r = this.dataArray[maxIndex+1];
+                    const delta = 0.5 * (r - l) / (2*c - l - r);
+                    exactFreq = (maxIndex + delta) * binSize;
+                }
+
+                const midi = 12 * Math.log2(exactFreq / 440) + 69;
+                let pitch = midi % 12;
+                if (pitch < 0) pitch += 12;
+
+                return {
+                    pitch: pitch,
+                    noteIndex: Math.round(pitch) % 12,
+                    amp: maxAmp
+                };
+            }
+        }
+
+        // --- 4. DISPLAY ENGINE ---
+        class DisplayEngine {
+            constructor() {
+                this.uiCanvas = document.getElementById('canvas-ui');
+                this.uiCtx = this.uiCanvas.getContext('2d');
+                this.sigCanvas = document.getElementById('canvas-signal');
+                this.sigCtx = this.sigCanvas.getContext('2d', { alpha: false });
+                this.resize();
+                window.addEventListener('resize', () => this.resize());
+            }
+
+            resize() {
+                const dpr = window.devicePixelRatio || 1;
+                const w = window.innerWidth;
+                const h = window.innerHeight;
+
+                [this.uiCanvas, this.sigCanvas].forEach(c => {
+                    c.width = w * dpr;
+                    c.height = h * dpr;
+                    c.style.width = w + 'px';
+                    c.style.height = h + 'px';
+                    c.getContext('2d').scale(dpr, dpr);
+                });
+
+                this.width = w;
+                this.height = h;
+                CONFIG.historySize = Math.ceil(w); 
+                this.drawUI();
+            }
+
+            drawUI() {
+                const ctx = this.uiCtx;
+                ctx.clearRect(0, 0, this.width, this.height);
+                const step = this.height / 12;
+                ctx.font = 'bold 16px Courier New';
+                ctx.textBaseline = 'middle';
+                ctx.lineWidth = 1;
+
+                for (let i = 0; i < 12; i++) {
+                    const y = this.height - ((i + 1) * step);
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+                    ctx.beginPath(); ctx.moveTo(50, y); ctx.lineTo(this.width, y); ctx.stroke();
+                    ctx.fillStyle = '#fff';
+                    ctx.fillText(CONFIG.notes[i], 10, y + step/2);
+                }
+                ctx.strokeStyle = '#666';
+                ctx.beginPath(); ctx.moveTo(50, 0); ctx.lineTo(50, this.height); ctx.stroke();
+            }
+
+            renderSignal() {
+                const ctx = this.sigCtx;
+                ctx.fillStyle = '#000';
+                ctx.fillRect(0, 0, this.width, this.height);
+                const step = this.height / 12;
+                
+                let x = this.width;
+                const speed = 2; 
+
+                for (let i = historyBuffer.length - 1; i >= 0; i--) {
+                    const point = historyBuffer[i];
+                    if (point) {
+                        const y = this.height - (point.pitch * step) - step;
+                        const color = CONFIG.colors[point.noteIndex];
+                        ctx.fillStyle = color;
+                        ctx.globalAlpha = 0.6;
+                        ctx.fillRect(x, y - 2, speed, 6); // Glow
+                        ctx.globalAlpha = 1.0;
+                        ctx.fillStyle = '#fff';
+                        ctx.fillRect(x, y, speed, 2); // Core
+                    }
+                    x -= speed;
+                    if (x < 50) break;
+                }
+            }
+        }
+
+        const audio = new AudioEngine();
+        const display = new DisplayEngine();
+        let isRunning = false;
+
+        document.getElementById('btn-start').addEventListener('click', async () => {
+            try {
+                await audio.init();
+                document.getElementById('overlay').style.display = 'none';
+                isRunning = true;
+                loop();
+            } catch(e) { 
+                console.error(e);
+                // Error is already logged by logError inside init()
+            }
+        });
+
+        function loop() {
+            if (!isRunning) return;
+            const peak = audio.getPeak();
+            historyBuffer.push(peak);
+            if (historyBuffer.length > CONFIG.historySize) historyBuffer.shift();
+            display.renderSignal();
+            requestAnimationFrame(loop);
+        }
+    </script>
+</body>
+</html>
