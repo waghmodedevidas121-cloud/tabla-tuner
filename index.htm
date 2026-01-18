@@ -3,38 +3,31 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Tabla Tuner Debug</title>
+    <title>Sargam Tabla Tuner</title>
     <style>
         :root { --bg: #000; --accent: #00e5ff; }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { background: var(--bg); overflow: hidden; height: 100vh; width: 100vw; font-family: monospace; }
 
-        /* Error Log Box */
         #debug-console {
-            position: absolute;
-            top: 10px; left: 10px;
-            width: 90%;
-            color: #ff3333;
-            background: rgba(20, 0, 0, 0.8);
-            border: 1px solid #ff0000;
-            padding: 10px;
-            z-index: 999;
-            display: none;
-            font-size: 14px;
-            pointer-events: none;
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 80%; color: #ff4444; background: rgba(0, 0, 0, 0.95);
+            border: 2px solid #ff0000; padding: 20px; z-index: 999;
+            display: none; font-size: 16px; text-align: center; border-radius: 10px;
         }
 
         #overlay {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.9); display: flex; align-items: center; justify-content: center; z-index: 100;
+            background: rgba(0,0,0,0.85); display: flex; align-items: center; justify-content: center; z-index: 100;
+            backdrop-filter: blur(4px);
         }
 
         #btn-start {
-            padding: 20px 40px; font-size: 1.2rem; font-weight: bold;
-            background: var(--accent); border: none; border-radius: 50px;
-            box-shadow: 0 0 20px var(--accent); cursor: pointer;
+            padding: 20px 50px; font-size: 1.5rem; font-weight: bold;
+            color: #000; background: var(--accent); border: none; border-radius: 50px;
+            box-shadow: 0 0 30px var(--accent); cursor: pointer; text-transform: uppercase;
         }
-
+        
         canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
         #canvas-ui { z-index: 10; pointer-events: none; }
         #canvas-signal { z-index: 5; }
@@ -52,80 +45,48 @@
     <canvas id="canvas-ui"></canvas>
 
     <script>
-        // --- 1. ERROR HANDLING SYSTEM ---
+        // --- ERROR HANDLING ---
         function logError(msg) {
-            const consoleDiv = document.getElementById('debug-console');
-            consoleDiv.style.display = 'block';
-            consoleDiv.innerHTML += "ERROR: " + msg + "<br>";
-            console.error(msg);
+            const div = document.getElementById('debug-console');
+            div.style.display = 'block';
+            div.innerHTML = "<strong>⚠️ ERROR</strong><br>" + msg;
         }
 
-        window.onerror = function(message, source, lineno, colno, error) {
-            logError(message);
-        };
-
-        // --- 2. CONFIG ---
+        // --- CONFIGURATION ---
         const CONFIG = {
-            fftSize: 16384, 
-            historySize: 0, // Will set based on screen width
+            fftSize: 32768, 
+            historySize: 0, 
             colors: ['#00FF00', '#00FF80', '#00FFFF', '#0080FF', '#0000FF', '#8000FF', '#FF00FF', '#FF0080', '#FF0000', '#FF8000', '#FFBF00', '#FFFF00'],
-            notes: ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'],
+            
+            // --- UPDATED LABELS (SARGAM) ---
+            // C=Sa, C#=Re(k), D=Re, D#=Ga(k), E=Ga, F=Ma, F#=Ma(t), G=Pa, G#=Dha(k), A=Dha, A#=Ni(k), B=Ni
+            notes: ['Sa', 'Re k', 'Re', 'Ga k', 'Ga', 'Ma', 'Ma t', 'Pa', 'Dha k', 'Dha', 'Ni k', 'Ni'],
+            
             threshold: 20
         };
 
         const historyBuffer = []; 
 
-        // --- 3. AUDIO ENGINE ---
+        // --- AUDIO ENGINE ---
         class AudioEngine {
-            constructor() {
-                this.ctx = null;
-                this.analyser = null;
-                this.dataArray = null;
-            }
+            constructor() { this.ctx = null; this.analyser = null; this.dataArray = null; }
 
             async init() {
                 try {
-                    // Check for Browser Support
-                    if (!window.AudioContext && !window.webkitAudioContext) {
-                        throw new Error("Web Audio API not supported in this browser.");
-                    }
-                    
+                    if (!window.AudioContext && !window.webkitAudioContext) throw new Error("Web Audio API not supported");
                     this.ctx = new (window.AudioContext || window.webkitAudioContext)();
                     this.analyser = this.ctx.createAnalyser();
                     this.analyser.fftSize = CONFIG.fftSize;
-                    
-                    // Critical: Resume context if suspended (Chrome requirement)
-                    if (this.ctx.state === 'suspended') {
-                        await this.ctx.resume();
-                    }
+                    if (this.ctx.state === 'suspended') await this.ctx.resume();
 
-                    // Request Mic
-                    const stream = await navigator.mediaDevices.getUserMedia({ 
-                        audio: { 
-                            echoCancellation: false, 
-                            noiseSuppression: false, 
-                            autoGainControl: false 
-                        } 
-                    });
-
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
                     const source = this.ctx.createMediaStreamSource(stream);
                     source.connect(this.analyser);
                     this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
-
                 } catch (err) {
-                    // Handle Specific Errors
-                    if (err.name === 'NotAllowedError') {
-                        logError("Microphone Access Denied. Please allow permission in settings.");
-                    } else if (err.name === 'NotFoundError') {
-                        logError("No Microphone found on this device.");
-                    } else if (err.name === 'NotReadableError') {
-                        logError("Microphone is busy or being used by another app.");
-                    } else if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
-                        logError("SECURITY ERROR: You are running on 'http' or 'file'. Mobile browsers require HTTPS for Microphone access. Please host this file.");
-                    } else {
-                        logError(err.name + ": " + err.message);
-                    }
-                    throw err; // Stop execution
+                    if (err.name === 'NotAllowedError') logError("Microphone Access Denied.");
+                    else logError(err.message);
+                    throw err;
                 }
             }
 
@@ -134,7 +95,6 @@
                 this.analyser.getByteFrequencyData(this.dataArray);
                 const binSize = this.ctx.sampleRate / CONFIG.fftSize;
                 
-                // Frequency Range (60Hz - 3000Hz)
                 const minBin = Math.floor(60 / binSize);
                 const maxBin = Math.floor(3000 / binSize);
 
@@ -151,7 +111,6 @@
                 if (maxAmp < CONFIG.threshold) return null;
 
                 let exactFreq = maxIndex * binSize;
-                // Interpolation
                 if (maxIndex > 0 && maxIndex < this.dataArray.length - 1) {
                     const l = this.dataArray[maxIndex-1];
                     const c = this.dataArray[maxIndex];
@@ -172,7 +131,7 @@
             }
         }
 
-        // --- 4. DISPLAY ENGINE ---
+        // --- DISPLAY ENGINE ---
         class DisplayEngine {
             constructor() {
                 this.uiCanvas = document.getElementById('canvas-ui');
@@ -193,7 +152,7 @@
                     c.height = h * dpr;
                     c.style.width = w + 'px';
                     c.style.height = h + 'px';
-                    c.getContext('2d').scale(dpr, dpr);
+                    c.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
                 });
 
                 this.width = w;
@@ -206,19 +165,30 @@
                 const ctx = this.uiCtx;
                 ctx.clearRect(0, 0, this.width, this.height);
                 const step = this.height / 12;
-                ctx.font = 'bold 16px Courier New';
+                // Slightly smaller font to fit longer names like "Re k"
+                ctx.font = 'bold 15px Courier New'; 
                 ctx.textBaseline = 'middle';
                 ctx.lineWidth = 1;
 
+                // Labels Width area
+                const labelWidth = 60;
+
                 for (let i = 0; i < 12; i++) {
                     const y = this.height - ((i + 1) * step);
+                    
+                    // Grid Line
                     ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-                    ctx.beginPath(); ctx.moveTo(50, y); ctx.lineTo(this.width, y); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(labelWidth, y); ctx.lineTo(this.width, y); ctx.stroke();
+                    
+                    // Label Text
                     ctx.fillStyle = '#fff';
-                    ctx.fillText(CONFIG.notes[i], 10, y + step/2);
+                    // Center the text vertically in the block
+                    ctx.fillText(CONFIG.notes[i], 5, y + step/2);
                 }
+                
+                // Vertical Divider
                 ctx.strokeStyle = '#666';
-                ctx.beginPath(); ctx.moveTo(50, 0); ctx.lineTo(50, this.height); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(labelWidth, 0); ctx.lineTo(labelWidth, this.height); ctx.stroke();
             }
 
             renderSignal() {
@@ -235,15 +205,17 @@
                     if (point) {
                         const y = this.height - (point.pitch * step) - step;
                         const color = CONFIG.colors[point.noteIndex];
+                        
                         ctx.fillStyle = color;
                         ctx.globalAlpha = 0.6;
-                        ctx.fillRect(x, y - 2, speed, 6); // Glow
+                        ctx.fillRect(x, y - 2, speed, 6); 
+                        
                         ctx.globalAlpha = 1.0;
                         ctx.fillStyle = '#fff';
-                        ctx.fillRect(x, y, speed, 2); // Core
+                        ctx.fillRect(x, y, speed, 2); 
                     }
                     x -= speed;
-                    if (x < 50) break;
+                    if (x < 60) break; // Don't draw over labels
                 }
             }
         }
@@ -258,17 +230,14 @@
                 document.getElementById('overlay').style.display = 'none';
                 isRunning = true;
                 loop();
-            } catch(e) { 
-                console.error(e);
-                // Error is already logged by logError inside init()
-            }
+            } catch(e) { console.error(e); }
         });
 
         function loop() {
             if (!isRunning) return;
             const peak = audio.getPeak();
             historyBuffer.push(peak);
-            if (historyBuffer.length > CONFIG.historySize) historyBuffer.shift();
+            if (historyBuffer.length > CONFIG.historySize + 50) historyBuffer.shift();
             display.renderSignal();
             requestAnimationFrame(loop);
         }
